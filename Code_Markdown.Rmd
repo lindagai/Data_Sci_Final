@@ -1,0 +1,1265 @@
+---
+title: "DataSci_Code.R"
+author: "Linda Gai"
+date: "10/31/2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Introduction
+#### Load libraries
+
+```{r}
+library(dplyr)
+library(tidytext)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(reshape2)
+library(stringr)
+library(grid)
+library(gridExtra)
+library(pROC)
+library(car)
+library(RSentiment)
+library(knitr)
+#trace("calculate_score",edit=TRUE)
+```
+
+#### Initialize the dataset
+
+```{r}
+
+source(file="Data/Analyze_Training_Sets.R")
+source(file="Data/merge_data.R")
+```
+
+### Exploratory data analysis and Enriching the dataset
+
+
+#### Word count
+
+Suicidal posts are more wordy than non-suicidal ones, so this looks like a good predictor.
+
+```{r wordcount}
+wordcount <- function(str) {
+  sapply(gregexpr("\\b\\W+\\b", str, perl=TRUE), function(x) sum(x>0) ) + 1 
+}
+
+complete<-complete %>%
+  mutate(wc = wordcount(text))
+
+save(complete,file = "complete.RData")
+```
+
+#### Compare sentiment between suicidal and non-suicidal texts
+
+I tried more complex sentiments, using the nrc library. The main differences seemed to be
+in positive and negative sentiments, though.
+
+```{r complex_sentiment}
+load(file = "complete.RData")
+
+#Get the tokens out of the posts
+post.tok <- complete %>% 
+  mutate(linenumber=row_number()) %>%
+  unnest_tokens(word,text) 
+
+nrc <- sentiments %>%
+  filter(lexicon == "nrc") %>%
+  dplyr::select(word, sentiment)
+
+#Label the words with the sentiments using an inner join
+#with the nrc sentiments
+post.sent = post.tok %>% inner_join(nrc)
+
+#Make a table of the sentiments
+# Table - only 10 sentiments in posts from
+#suicidal users
+sui.sent <- post.sent %>%
+  filter(suicidal=='suicidal') %>%
+  group_by(sentiment) %>%
+  summarize(n=n()) %>%
+  filter(n>10) %>%  
+  arrange(desc(n))
+
+# Table - 10 most common sentiments in posts NOT in r/depression 
+# from from suicidal users
+not.sui.sent <- post.sent %>% 
+  filter(suicidal=='not suicidal') %>%
+  group_by(sentiment) %>%
+  summarize(n=n()) %>%
+  filter(n>10) %>%  
+  arrange(desc(n))
+
+#not.sui.sent[1:10,]
+
+comparison <- sui.sent %>%
+  rename(sui = n) %>%
+  inner_join(not.sui.sent,by="sentiment") %>%
+  rename(not.sui = n) %>%
+  mutate(sui = sui / sum(sui),
+         not.sui = not.sui / sum(not.sui),diff=sui-not.sui) %>%
+  arrange(diff)
+
+sui.sent.for.merge <- comparison[1:10,1:2] %>%
+  mutate(suicidal = "suicidal")
+not.sui.sent.for.merge <- comparison[1:10,c(1,3)] %>%
+  mutate(suicidal = "not suicidal")
+
+colnames(sui.sent.for.merge)<-c("sentiment","value","suicidal")
+colnames(not.sui.sent.for.merge)<-c("sentiment","value","suicidal")
+
+plot.sentiments <-rbind(sui.sent.for.merge,not.sui.sent.for.merge)
+
+plot.sentiments$sentiment <- factor(plot.sentiments$sentiment, 
+                                    levels = plot.sentiments$sentiment[order(comparison[1:10,]$diff)])
+plot.sentiments$sentiment  # notice the changed order of factor levels
+
+ggplot(plot.sentiments, aes(sentiment, value)) +
+  geom_bar(aes(fill = suicidal), position = "dodge", stat="identity")
+
+```
+
+#### Simple sentiment scores
+Simple sentiments (positive, negative, neutral)
+
+
+```{r simple_sentiment}
+
+load(file = "complete.RData")
+
+#Make a table of the sentiments
+# Table - only 10 sentiments in posts from
+#suicidal users
+complete <- complete %>%
+  mutate(score = calculate_score(text), post.id = row_number())
+
+save(complete,file="complete.RData")
+load(file="complete.RData")
+
+#Plot the sentiment range
+#hist(complete2$score)
+
+ggplot(complete, aes(post.id, score, color=factor(suicidal)))+
+  geom_point() + 
+  scale_color_brewer(palette="Set1")+
+  labs(title = "Sentiment score in mental health subreddits")+
+  theme(legend.position = c(0.2, 0.15))
+```
+
+
+#### Readability
+
+Suicidal posts are less readable than non-suicidal ones (higher reading age/grade-level), so this looks like a good predictor.
+
+```{r readability}
+#### Linguistic Features ###
+
+#Readability
+#install.packages('koRpus')
+#install.packages('tm')
+library(koRpus)
+#library(tm)
+
+#get my list of source files.
+load(file="complete.RData")
+
+#Write each post to its own file
+n <-length(complete$text)
+
+filepaths <-rep("",n)
+
+for (i in 1:n){
+  str <-complete$text[i]
+  text<- paste(str,i,sep="")
+  filename <-paste("str/str",i,".txt",sep="")
+  filepaths[i]<-filename
+  write(str,file=filename)
+}
+
+#list of kRp.tagged object using tokenize which is the default tagger
+#given with the koRpus package
+ll.tagged <- lapply(filepaths, tokenize, lang="en")
+
+#Once I have my list of "tagged" objects I can get flesch-kincaid readability, in age
+ll.flesch <- lapply(ll.tagged,flesch.kincaid,quiet=TRUE)
+age <-rep(0,n)
+
+#
+
+#Now write all those to a .txt file
+for (i in 1:n){
+  age[i] <-attr(ll.flesch[[i]], which="Flesch.Kincaid")$age
+}
+
+complete <- complete %>%
+  mutate(age = age)
+
+#Write complete data to file
+save(complete,file = "complete.RData")
+
+load(file="complete.RData")
+#complete2 <- complete2 %>% 
+
+ggplot(complete, aes(post.id, age, color=factor(suicidal)))+
+  geom_point() + 
+  #  scale_color_brewer(palette="Set1")  +
+  labs(title = "Reading age of posts and
+       comments in mental health subreddits")
+
+#Looks like the readability of the suicidal posts is 15 or above?
+#almost def above 30
+#most are under 15 for both categories
+
+```
+
+
+#### Word choice
+
+For this section, note that value is percentage of the text that contains that word (e.g., the text "cat dog cat" is 66.7% "cat").
+
+#####Part 1: Stop words
+
+#####Part 1.A : Non-suicidal words
+
+```{r non_suicidal_stop_words}
+load("complete.RData")
+
+#Get the tokens out of the posts
+post.tok <- complete %>% 
+  mutate(linenumber=row_number()) %>%
+  unnest_tokens(word,text) 
+
+###Part 1: Stop words
+
+###Part 1.A : Non-suicidal words
+data("stop_words")
+tidy.post.tok <- post.tok
+
+#Get counts for each
+suicidal.post.tok <- tidy.post.tok %>%
+  filter(suicidal=='suicidal') %>%
+  group_by(word) %>%
+  summarize(n=n()) %>%
+  arrange(desc(n))
+
+not.suicidal.post.tok <- tidy.post.tok %>%
+  filter(suicidal=='not suicidal') %>%
+  group_by(word) %>%
+  summarize(n=n()) %>%
+  arrange(desc(n))
+
+comparison <- suicidal.post.tok %>%
+  rename(sui = n) %>%
+  inner_join(not.suicidal.post.tok,by="word") %>%
+  rename(not.sui = n) %>%
+  mutate(sui = sui / sum(sui),
+         not.sui = not.sui / sum(not.sui),diff=sui-not.sui) %>%
+  arrange(diff)
+
+#The words used by the depression NON-suicidal users is interesting.
+#We could use these as predictors for the logistic regression.
+head(comparison)
+
+#The words most used by the suicidal users isn't useful,
+#since we identify them by the words "die", "kill", etc.,
+#so it's unsurprising the words in the phrases we used to 
+#appear the most frequently and don't appear much in the non-suicidal group.
+tail(comparison)
+
+range(comparison$diff) 
+
+#Plot the difference in word use as graphs
+plot.words <- melt(head(comparison)) %>% filter(variable!="diff")
+
+plot.words$word <- factor(plot.words$word, 
+                          levels = plot.words$word[order(comparison[1:10,]$diff)])
+plot.words$word  # notice the changed order of factor levels
+
+ggplot(plot.words, aes(word, value))+
+  geom_bar(aes(fill = variable), position = "dodge", stat="identity")+
+  labs(title = "Word choice in posts and comments in mental health subreddits")+
+  theme(legend.position = c(0.86, 0.85))
+```
+
+```{r suicidal_stop_words_graph}
+#Now write all those to a column
+n<-length(complete$text)
+
+#these words are wrong, fix them
+a_word<-rep(0,n) 
+is_word<-rep(0,n)
+are_word<-rep(0,n)
+can_word<-rep(0,n)
+
+for (i in 1:n) {
+  a_word[i] <-str_count(complete$text[i],"a") + str_count(complete$text[i],"a") 
+  is_word[i] <-str_count(complete$text[i]," is ") + str_count(complete$text[i],"Is ")
+  are_word[i] <-str_count(complete$text[i]," are ") + str_count(complete$text[i]," Are ") 
+  can_word[i] <-str_count(complete$text[i]," can ") + str_count(complete$text[i],"Can ") 
+}
+
+complete<- cbind(complete,a_word,is_word,are_word,
+                 can_word)
+save(complete,file = "complete.RData")
+load(file="complete.RData")
+
+```
+
+
+###Part1.B Suicidal users' stop words
+
+```{r suicidal_stop_words}
+#Plot the difference in word use as graphs
+
+sui.words <-tail(comparison)
+plot.words2 <- melt(sui.words) %>% filter(variable!="diff")
+
+plot.words2$word <- factor(plot.words2$word, 
+                           levels = plot.words2$word[order(sui.words$diff)])
+
+plot.words2$word  # notice the changed order of factor levels
+
+ggplot(plot.words2, aes(word, value))+
+  geom_bar(aes(fill = variable), position = "dodge", stat="identity")+
+  labs(title = "Word choice in posts and comments in mental health subreddits")+
+  theme(legend.position = c(0.16, 0.85))
+
+
+```
+
+
+```{r suicidal_stop_words_cont}
+range(sui.words$diff)
+
+#Now write all those to a column
+n<-length(complete$text)
+
+to_word<-rep(0,n)
+and_word<-rep(0,n)
+want_word<-rep(0,n)
+
+for (i in 1:n) {
+  to_word[i] <-str_count(complete$text[i]," to ") + str_count(complete$text[i]," To ") 
+  and_word[i] <-str_count(complete$text[i]," and ") + str_count(complete$text[i],"And ") 
+  want_word[i] <-str_count(complete$text[i],"want") 
+}
+
+complete<- cbind(complete,to_word,and_word,want_word)
+
+```
+
+
+#####Part 2: Non-stop words
+#####Part 2.A : Non-suicidal words
+
+```{r Non-suicidal_stop_words}
+#get rid of stop words
+data("stop_words")
+tidy.post.tok <- post.tok %>%
+  anti_join(stop_words)
+
+#Get counts for each
+suicidal.post.tok <- tidy.post.tok %>%
+  filter(suicidal=='suicidal') %>%
+  group_by(word) %>%
+  summarize(n=n()) %>%
+  arrange(desc(n))
+
+not.suicidal.post.tok <- tidy.post.tok %>%
+  filter(suicidal=='not suicidal') %>%
+  group_by(word) %>%
+  summarize(n=n()) %>%
+  arrange(desc(n))
+
+comparison <- suicidal.post.tok %>%
+  rename(sui = n) %>%
+  inner_join(not.suicidal.post.tok,by="word") %>%
+  rename(not.sui = n) %>%
+  mutate(sui = sui / sum(sui),
+         not.sui = not.sui / sum(not.sui),diff=sui-not.sui) %>%
+  arrange(diff)
+
+#The words used by the depression NON-suicidal users is interesting.
+#We could use these as predictors for the logistic regression.
+head(comparison)
+
+#The words most used by the suicidal users isn't useful,
+#since we identify them by the words "die", "kill", etc.,
+#so it's unsurprising the words in the phrases we used to 
+#appear the most frequently and don't appear much in the non-suicidal group.
+tail(comparison)
+
+range(comparison$diff) 
+
+#Plot the difference in word use as graphs
+plot.words <- melt(head(comparison)) %>% filter(variable!="diff")
+
+plot.words$word <- factor(plot.words$word, 
+                          levels = plot.words$word[order(comparison[1:10,]$diff)])
+plot.words$word  # notice the changed order of factor levels
+
+ggplot(plot.words, aes(word, value))+
+  geom_bar(aes(fill = variable), position = "dodge", stat="identity")+
+  labs(title = "Word choice in posts and comments in mental health subreddits")+
+  theme(legend.position = c(0.86, 0.85))
+```
+
+
+```{r non_suicidal_stop_words_cont}
+#Now write all those to a column
+n<-length(complete$text)
+
+#these words are wrong, fix them
+people_word<-rep(0,n)
+person_word<-rep(0,n) 
+hope_word<-rep(0,n) 
+advice_word<-rep(0,n)
+positive_word<-rep(0,n)
+anxiety_word<-rep(0,n)
+
+for (i in 1:n) {
+  people_word[i] <-str_count(complete$text[i],"people") 
+  person_word[i] <-str_count(complete$text[i],"person") 
+  hope_word[i] <-str_count(complete$text[i],"hope") 
+  advice_word[i] <-str_count(complete$text[i],"advice") 
+  positive_word[i] <-str_count(complete$text[i],"positive") 
+  anxiety_word[i] <-str_count(complete$text[i],"anxiety") 
+}
+
+complete<- cbind(complete, people_word,person_word,hope_word,advice_word,
+                 positive_word,anxiety_word)
+save(complete,file = "complete.RData")
+
+```
+
+
+##### Part 2.B Suicidal users' words
+
+```{r Suicidal_posts_words}
+#Plot the difference in word use as graphs
+
+sui.words <-tail(comparison)
+plot.words2 <- melt(sui.words) %>% filter(variable!="diff")
+#sui.words<-plot.words2
+#sui.words
+
+#desc(sui.words$diff)
+plot.words2$word <- factor(plot.words2$word, 
+                           levels = plot.words2$word[order(sui.words$diff)])
+
+plot.words2$word  # notice the changed order of factor levels
+
+ggplot(plot.words2, aes(word, value))+
+  geom_bar(aes(fill = variable), position = "dodge", stat="identity")+
+  labs(title = "Word choice in posts and comments in mental health subreddits")+
+  theme(legend.position = c(0.16, 0.85))
+
+range(sui.words$diff)
+
+#Now write all those to a column
+n<-length(complete$text)
+
+kill_word<-rep(0,n)
+die_word<-rep(0,n)
+anymore_word<-rep(0,n)
+life_word<-rep(0,n)
+fucking_word <-rep(0,n)
+dont_word <-rep(0,n)
+
+for (i in 1:n) {
+  kill_word[i] <-str_count(complete$text[i],"kill") 
+  die_word[i] <-str_count(complete$text[i]," die ") +
+    str_count(complete$text[i]," die.") +
+    str_count(complete$text[i]," die!") +
+    str_count(complete$text[i]," die?") +
+    str_count(complete$text[i]," died") + 
+    str_count(complete$text[i]," DIE")
+  life_word[i] <-str_count(complete$text[i],"life") 
+  anymore_word[i] <-str_count(complete$text[i],"anymore") 
+  fucking_word[i] <-str_count(complete$text[i],"fucking") 
+  dont_word[i] <-str_count(complete$text[i],"don't") 
+}
+
+complete<- cbind(complete, kill_word,die_word,anymore_word,
+                 life_word,fucking_word,dont_word)
+
+save(complete,file = "complete.RData")
+```
+
+#### Pronoun Use/Higher Self-Attentional Focus
+
+Suicidal people exhibit more self-attentional focus, so their pronoun use looks to be of interest.
+
+##### 1st person
+```{r}
+#2. Higher self-attentional focus
+#Pronouns
+load(file="complete.RData")
+#Now write all those to a column
+n<-length(complete$text)
+first_pronouns<-rep(0,n)
+
+for (i in 1:n) {
+  first_pronouns[i] <-str_count(complete$text[i]," I ") +
+    str_count(complete$text[i]," i ") +
+    str_count(complete$text[i],"I’m") +
+    str_count(complete$text[i],"I‘d") +
+    str_count(complete$text[i],"I‘ll") +
+    str_count(complete$text[i],"I’ve") +
+    str_count(complete$text[i]," me ") +
+    str_count(complete$text[i]," me.") +
+    str_count(complete$text[i]," me?") +
+    str_count(complete$text[i]," me!") +
+    str_count(complete$text[i]," my ") +
+    str_count(complete$text[i]," My ")
+}
+
+complete<- cbind(complete, first_pronouns)
+
+save(complete,file = "complete.RData")
+
+ggplot(complete, aes(post.id, first_pronouns,color=factor(suicidal)))+
+  geom_point() + 
+  scale_color_brewer(palette="Set1")  +
+  labs(title = "First-person pronouns in reddit posts")+
+  theme(legend.position = c(0.1, 0.9))
+
+```
+
+##### 2nd person
+```{r}
+#2nd person
+n<-length(complete$text)
+sec_pronouns<-rep(0,n)
+
+for (i in 1:n) {
+  sec_pronouns[i] <-str_count(complete$text[i]," you ") + str_count(complete$text[i],"You") +
+    str_count(complete$text[i]," you’re ") + str_count(complete$text[i],"You're") +
+    str_count(complete$text[i],"you’d") + str_count(complete$text[i],"You'd") +
+    str_count(complete$text[i],"you’ll") + str_count(complete$text[i],"You'll") +
+    str_count(complete$text[i],"you’ve") + str_count(complete$text[i],"You've") +
+    str_count(complete$text[i],"your") + str_count(complete$text[i],"Your") +
+    str_count(complete$text[i],"yours")
+}
+
+complete<- cbind(complete, sec_pronouns)
+
+save(complete,file = "complete.RData")
+
+ggplot(complete, aes(post.id, sec_pronouns,color=factor(suicidal)))+
+  geom_point() + 
+  scale_color_brewer(palette="Set1")  +
+  labs(title = "Second-person pronouns in reddit posts")+
+  theme(legend.position = c(0.1, 0.9))
+```
+
+
+##### 3rd person
+```{r}
+
+#3rd person
+source(file="pronoun_dict.R")
+third.pronouns <-as.data.frame(word.list[3])
+colnames(third.pronouns) <-"word"
+
+#suicidal
+sui.post.tok <- complete %>% 
+  filter(suicidal=='suicidal') %>%
+  unnest_tokens(word,text) 
+
+sui.pronoun.post.tok <- sui.post.tok %>%
+  group_by(word) %>%
+  summarize(n=n()) %>%
+  arrange(desc(n))
+
+sui.third = inner_join(sui.post.tok, third.pronouns,by="word")
+
+sui.results <- sui.third %>%
+  group_by(word) %>%
+  summarize(n=n()) %>%
+  arrange(desc(n))
+
+#Not suicidal
+not.sui.post.tok <- complete %>% 
+  filter(suicidal=='not suicidal') %>%
+  unnest_tokens(word,text) 
+
+not.sui.pronoun.post.tok <- not.sui.post.tok %>%
+  group_by(word) %>%
+  summarize(n=n()) %>%
+  arrange(desc(n))
+
+not.sui.third = inner_join(not.sui.pronoun.post.tok, third.pronouns,by="word")
+
+not.sui.results <- not.sui.third %>%
+  group_by(word) %>%
+  summarize(n=n()) %>%
+  arrange(desc(n))
+
+third.comparison <- sui.results %>%
+  rename(sui = n) %>%
+  inner_join(not.sui.results,by="word") %>%
+  rename(not.sui = n) %>%
+  mutate(sui = sui / sum(sui),
+         not.sui = not.sui / sum(not.sui),diff=sui-not.sui) %>%
+  arrange(diff)
+
+#Plot the difference in word use as graphs
+library(reshape2)
+#plot.words <- melt(comparison[1:10,]) %>% filter(variable!="diff")
+plot.words <- melt(third.comparison) %>% filter(variable!="diff")
+
+plot.words$word <- factor(plot.words$word, 
+                          levels = plot.words$word[order(third.comparison$diff)])
+plot.words$word  # notice the changed order of factor levels
+
+ggplot(plot.words, aes(word, value))+
+  geom_bar(aes(fill = variable), position = "dodge", stat="identity")+
+  labs(title = "Word choice in posts and comments in mental health subreddits")+
+  theme(legend.position = c(0.86, 0.85))
+
+#it looks predictive
+#her and it words predict suicidal thoughts, all other pronouns are not suicidal
+her_word<-rep(0,nrow(complete))
+for (i in 1:n) {
+  her_word[i] <-
+    str_count(complete$text[i]," her ") +     str_count(complete$text[i]," Her ") +
+    str_count(complete$text[i]," her.") +     str_count(complete$text[i],"her!") +
+    str_count(complete$text[i]," her? ")
+}
+
+it_word<-rep(0,nrow(complete))
+for (i in 1:n) {
+  it_word[i] <-str_count(complete$text[i]," I ") +
+    str_count(complete$text[i]," it ") +     str_count(complete$text[i],"It ") +
+    str_count(complete$text[i]," it. ") +     str_count(complete$text[i],"it!") +
+    str_count(complete$text[i]," it? ")
+}
+
+third_pronouns<-rep(0,nrow(complete))
+for (i in 1:n) {
+  third_pronouns[i]<-
+    str_count(complete$text[i]," hers ") + str_count(complete$text[i],"Her ") +
+    str_count(complete$text[i],"it's") + str_count(complete$text[i],"It's") +
+    str_count(complete$text[i]," its ") + str_count(complete$text[i],"Its") +
+    str_count(complete$text[i]," his ") +     str_count(complete$text[i]," His ") + 
+    str_count(complete$text[i],"their") +     str_count(complete$text[i],"Their") + 
+    str_count(complete$text[i]," he ") +     str_count(complete$text[i],"He ") + 
+    str_count(complete$text[i]," him") +
+    str_count(complete$text[i],"them") +
+    str_count(complete$text[i],"they") +     str_count(complete$text[i],"They")
+}
+
+complete<-cbind(complete,third_pronouns,it_word,her_word)
+save(complete,file="complete.RData")
+load("complete.RData")
+
+ggplot(complete, aes(post.id, it_word,color=factor(suicidal)))+
+  geom_point() + 
+  scale_color_brewer(palette="Set1")  +
+  labs(title = "Use of 'it' in reddit posts")+
+  theme(legend.position = c(0.1, 0.9))
+
+ggplot(complete, aes(post.id, third_pronouns,color=factor(suicidal)))+
+  geom_point() + 
+  scale_color_brewer(palette="Set1")  +
+  labs(title = "Third-person pronouns in reddit posts")+
+  theme(legend.position = c(0.1, 0.9))
+
+ggplot(complete, aes(post.id, her_word,color=factor(suicidal)))+
+  geom_point() + 
+  scale_color_brewer(palette="Set1")  +
+  labs(title = "Use of word 'her' in reddit posts")+
+  theme(legend.position = c(0.1, 0.9))
+
+```
+
+
+##### Triggers
+
+These were chosen based on the subject matter of the hand classified posts.
+```{r}
+girl_word<-rep(0,nrow(complete))
+for (i in 1:n) {
+  girl_word[i]<-str_count(complete$text[i],"girl") + str_count(complete$text[i],"Girl")
+}
+
+family_words<-rep(0,nrow(complete))
+for (i in 1:n) {
+  family_words[i]<- str_count(complete$text[i],"Mom") + str_count(complete$text[i],"mom") + 
+    str_count(complete$text[i],"dad") + str_count(complete$text[i],"Dad") + 
+    str_count(complete$text[i],"parents") + str_count(complete$text[i],"family") +
+    str_count(complete$text[i],"brother") + str_count(complete$text[i],"sister") +
+    str_count(complete$text[i],"cousin")
+}
+
+job_words<-rep(0,nrow(complete))
+for (i in 1:n) {
+  job_words[i]<- str_count(complete$text[i],"job") + str_count(complete$text[i],"employ") 
+}
+
+friend_words<-rep(0,nrow(complete))
+for (i in 1:n) {
+  friend_words[i]<- str_count(complete$text[i],"friend") + str_count(complete$text[i],"Friend")
+}
+
+lone_words<-rep(0,nrow(complete))
+for (i in 1:n) {
+  lone_words[i]<- str_count(complete$text[i],"lone") +
+    str_count(complete$text[i],"no one") + str_count(complete$text[i],"No one")
+}
+
+therapy_words<-rep(0,nrow(complete))
+for (i in 1:n) {
+  therapy_words[i]<- str_count(complete$text[i],"psychiatr") + str_count(complete$text[i],"Psychiatr") 
+    str_count(complete$text[i],"therap") + str_count(complete$text[i],"Therap")
+}
+
+help_word<-rep(0,nrow(complete))
+for (i in 1:n) {
+  help_word[i]<- str_count(complete$text[i],"help")
+}
+
+complete<-cbind(complete,girl_word,family_words,job_words,friend_words,lone_words,therapy_words,help_word)
+save(complete,file="complete.RData")
+load("complete.RData")
+
+ggplot(complete, aes(post.id, girl_word,color=factor(suicidal)))+
+  geom_point() + 
+  scale_color_brewer(palette="Set1")  +
+  labs(title = "Use of 'girl' in reddit posts")+
+  theme(legend.position = c(0.1, 0.9))
+
+ggplot(complete, aes(post.id, family_words,color=factor(suicidal)))+
+  geom_point() + 
+  scale_color_brewer(palette="Set1")  +
+  labs(title = "Word choice in reddit posts")+
+  theme(legend.position = c(0.1, 0.9))
+
+ggplot(complete, aes(post.id, friend_words,color=factor(suicidal)))+
+  geom_point() + 
+  scale_color_brewer(palette="Set1")  +
+  labs(title = "Word choice in reddit posts")+
+  theme(legend.position = c(0.1, 0.9))
+
+ggplot(complete, aes(post.id, lone_words,color=factor(suicidal)))+
+  geom_point() + 
+  scale_color_brewer(palette="Set1")  +
+  labs(title = "Word choice in reddit posts")+
+  theme(legend.position = c(0.1, 0.9))
+
+ggplot(complete, aes(post.id, therapy_words,color=factor(suicidal)))+
+  geom_point() + 
+  scale_color_brewer(palette="Set1")  +
+  labs(title = "Word choice in reddit posts")+
+  theme(legend.position = c(0.1, 0.9))
+
+ggplot(complete, aes(post.id, help_word,color=factor(suicidal)))+
+  geom_point() + 
+  scale_color_brewer(palette="Set1")  +
+  labs(title = "Word choice in reddit posts")+
+  theme(legend.position = c(0.1, 0.9))
+```
+
+
+####Clean up the dataset
+```{r}
+#Change all word counts to log
+predictors<-colnames(complete)[11:40]
+
+n<-length(predictors)
+mut_text=""
+
+for (i in 1:n){
+  currvar <-predictors[i]
+  if (i==n){
+    mut_text = paste(mut_text,'mutate(', currvar, '=log(',currvar, '+1))', sep="")
+  }else{
+    mut_text = paste(mut_text,'mutate(', currvar, '=log(',currvar, '+1)) %>% ', sep="")
+  }
+}
+
+
+complete2<- complete %>%
+  mutate(wc=log(wc+1)) %>%
+  mutate(score=log(score+100)) %>%
+#  mutate(grade=log(grade+5)) %>%
+  mutate(age=log(age)) %>% 
+  mutate(a_word = log(a_word+1)) %>%
+  mutate(is_word =log(is_word+1)) %>% 
+  mutate(are_word = log(are_word+1)) %>%
+  mutate(can_word=log(can_word+1)) %>%
+  mutate(to_word=log(to_word+1)) %>%
+  mutate(and_word=log(and_word+1)) %>%
+  mutate(want_word = log(want_word+1)) %>%  
+  mutate(people_word=log(people_word+1)) %>%
+  mutate(person_word = log(person_word+1)) %>%
+  mutate(hope_word=log(hope_word+1)) %>%
+  mutate(advice_word = log(advice_word+1)) %>%
+  mutate(positive_word = log(positive_word+1)) %>%
+  mutate(anxiety_word = log(anxiety_word+1)) %>%
+  mutate(kill_word=log(kill_word+1)) %>%
+  mutate(die_word=log(die_word+1)) %>% #
+  mutate(anymore_word = log(anymore_word+1)) %>%
+  mutate(life_word = log(life_word+1)) %>%
+  mutate(fucking_word = log(fucking_word+1)) %>%
+  mutate(dont_word = log(dont_word+1)) %>%
+  mutate(first_pronouns=log(first_pronouns+1)) %>%
+  mutate(sec_pronouns=log(sec_pronouns+1)) %>%
+  mutate(third_pronouns=log(third_pronouns+1)) %>%
+  mutate(it_word=log(it_word+1)) %>% #
+  mutate(her_word=log(her_word+1)) %>%
+  mutate(girl_word=log(girl_word+1)) %>%
+  mutate(family_words=log(family_words+1)) %>%
+  mutate(job_words=log(job_words+1)) %>%
+  mutate(friend_words = log(friend_words+1)) %>% 
+  mutate(lone_words = log(lone_words+1)) %>% #
+  mutate(therapy_words=log(therapy_words+1)) %>%
+  mutate(help_word=log(help_word+1))
+
+save(complete2,file = "complete2.RData")
+```
+
+
+### Graph each log-word count
+```{r}
+load("complete2.RData")
+
+log_predictors <-colnames(complete2[,10:40])
+
+#No y-limit
+for (i in 1:length(log_predictors)){
+  curr_var <-log_predictors[i]
+  eval(parse(text=paste('p',i,'<- ggplot(complete2, aes(post.id, ',curr_var,',color=factor(suicidal)))+geom_point() +ylim(0,10)+scale_color_brewer(palette="Set1")',sep="")))
+}
+
+#They've all been logged
+for (i in 1:length(log_predictors)){
+  curr_var <-log_predictors[i]
+  eval(parse(text=paste('print(p',i,')',sep="")))
+}
+```
+
+
+##### Final clean-up
+```{r}
+load("complete.RData")
+
+#Edit the dataframe to change 'suicidal' to 1,
+load("complete.RData")
+complete$suicidal<-gsub("not suicidal",0, complete$suicidal)
+complete$suicidal<-gsub("suicidal",1, complete$suicidal)
+complete$suicidal<-as.integer(complete$suicidal)
+save(complete, file="complete.RData")
+
+load("complete2.RData")
+complete2$suicidal<-gsub("not suicidal",0, complete2$suicidal)
+complete2$suicidal<-gsub("suicidal",1, complete2$suicidal)
+complete2$suicidal<-as.integer(complete2$suicidal)
+save(complete2, file="complete2.RData")
+
+######################
+
+```
+
+#### Analysis
+```{r}
+#Prepare the datasets
+load("complete2.RData")
+
+#Select the outcome and predictors
+data.for.analysis <-complete2 %>%
+  select(suicidal)
+data.for.analysis <-cbind(data.for.analysis,complete2[,7:40])
+
+save(data.for.analysis,file = "Data_for_analysis.RData")
+load("Data_for_analysis.RData")
+
+##############
+
+#Get your training and test sets
+set.seed(1)
+train.indices<-sample(1368,1024)
+training.set <-data.for.analysis[train.indices,]
+test.set <-data.for.analysis[-train.indices,]
+
+#Fit the full model
+fit_full<-glm(suicidal~.,data=training.set,family=binomial)
+summary(fit_full)
+
+#Select a model using backwards stepwise selection
+fit_reduced = step(fit_full,trace=0)
+summary(fit_reduced)
+formula(fit_reduced)
+
+training.subset <-training.set %>%
+  select(c(suicidal,age , is_word , and_word , want_word , people_word , 
+           person_word , advice_word , positive_word , anxiety_word , 
+           kill_word , die_word , anymore_word , life_word , fucking_word , 
+           first_pronouns , sec_pronouns , her_word , job_words , therapy_words))
+
+```
+
+##### Check model assumptions
+```{r}
+#Check for collinearity
+vif(fit_reduced)
+
+# get rid of 'first_pronouns" and 'and_words' as a predictor
+#since the VIF are > 2.5
+
+#Refit model
+training.subset2 <-training.subset %>%
+  select(-c(and_word,first_pronouns))
+
+fit_reduced2<-glm(suicidal~.,data=training.subset2,family=binomial)
+summary(fit_reduced2)
+
+#Use BSS to drop non-significant predictors
+training.subset3 <- training.subset2 %>%
+  select(-is_word)
+
+fit_reduced3 <-glm(suicidal~.,data=training.subset3,family=binomial)
+summary(fit_reduced3)
+
+training.subset4 <- training.subset3 %>%
+  select(-anxiety_word)
+
+fit_reduced4 = glm(suicidal~.,data=training.subset4,family=binomial)
+summary(fit_reduced4)
+
+training.subset5 <- training.subset4 %>%
+  select(-her_word)
+
+fit_reduced5 = glm(suicidal~.,data=training.subset5,family=binomial)
+summary(fit_reduced5)
+```
+
+##### Check for outliers
+###### Deviance Residuals
+```{r}
+#Deviance Residuals identify observations not well explained by the model.
+resids.deviance<-residuals(fit_reduced5, type = c("deviance"))
+plot(resids.deviance,training.subset5$post.id)
+#a couple of outliers<-3 but nothing too crazy
+
+predictor.names<-colnames(training.subset5)[-1]
+n<-length(predictor.names)
+#Make plots
+for (i in 1:n){
+  currvar <- predictor.names[i]
+  eval(parse(text=paste('plot(training.subset5$',currvar,',resids.deviance)',sep="")))
+}
+```
+
+Overall seems to not have many outliers...most within [-3,3], a few at -4
+
+###### Hat Diagonals
+```{r}
+#Hat Matrix Diagonal detects extreme large points in the design space.
+#These are often labeled as "leverage" or "hi" and are related to standardized residuals.
+#A general rule says that if hi > 2*p/n or > 3*p/n the points is influential.
+#Here "p" is the number of parameters in the model and "n" the number of observations.
+
+#Here, 3*20/1024 = 0.05859375
+
+#hats<-influence.measures(fit_reduced)$hat
+hats<-hatvalues(fit_reduced5)
+training.subset5 <- training.subset5 %>% mutate(index = row_number())
+plot(hats,training.subset5$index)
+training.subset5 <- training.subset5 %>% 
+  select(-index)
+```
+
+There are quite a lot of possibly influential points. We will get rid of only the extreme outliers.
+
+```{r}
+#Check if removing them does anything to the model
+training.subset6<- cbind(training.subset5,resids.deviance,hats) %>%
+  filter(!resids.deviance < -3) %>%
+  filter(!hats > 0.2) %>%
+  select(-c(resids.deviance,hats))
+
+
+fit6 = glm(suicidal~.,data=training.subset6,family=binomial)
+summary(fit6)
+
+#It does, so we remove the outliers and the predictors
+#Therapy, advice, and people should be dropped
+#Use BSS
+
+training.subset7 <- training.subset6 %>%
+  select(-therapy_words)
+
+fit_reduced7 = glm(suicidal~.,data=training.subset7,family=binomial)
+summary(fit_reduced7)
+
+training.subset8 <- training.subset7 %>%
+  select(-people_word)
+
+fit_reduced8 = glm(suicidal~.,data=training.subset8,family=binomial)
+summary(fit_reduced8)
+
+training.subset9 <- training.subset8 %>%
+  select(-advice_word)
+
+fit_reduced9 = glm(suicidal~.,data=training.subset9,family=binomial)
+summary(fit_reduced9)
+
+
+```
+
+##### Check linear relationship between the logit of the response and the predictors
+
+```{r}
+#This looks non-linear because of the predictors
+predictor.names<-colnames(training.subset9)[-1]
+n<-length(predictor.names)
+
+mut_text=""
+#Means
+for (i in 1:n){
+  if (i==n){
+    currvar<-predictor.names[i]
+    mut_text = paste(mut_text,'mutate(', currvar, '=mean(training.subset9$',currvar,'))', sep="")
+  } else {
+    currvar<-predictor.names[i]
+    mut_text = paste(mut_text,'mutate(', currvar, '=mean(training.subset9$',currvar,')) %>% ', sep="")
+  }
+}
+
+mean_data_text <- paste('mean_data<- training.subset9 %>% ',mut_text,sep="")
+mean_data_text
+eval(parse(text=mean_data_text))
+
+#Make plots
+for (i in 1:n){
+  currvar <- predictor.names[i]
+  othervar <-predictor.names[-i]
+  
+  #Add the non-modified currvar to the temp
+  temp <- mean_data
+  eval(parse(text=paste('temp$',currvar,'<-training.subset9$',currvar,sep="")))
+  
+  #Get the predictions, with the other variables held constant
+  predictions <- predict(fit_reduced9,temp,type="response")
+  log.odds<-predictions
+  temp <- temp %>% mutate(log.odds = log.odds)
+  #Get the plot
+  eval(parse(text=paste('plot(temp$',currvar,',temp$log.odds)',sep="")))
+}
+```
+
+Kill is not linear, so we drop it to avoid biasing the model too much.
+Fucking,anymore, die, and want are not super linear either, but they aren't as extreme
+and are very predictive, so we keep them.
+
+## Final model
+
+```{r}
+training.subset10 <- training.subset9 %>%
+  #select(-c(fucking_word,anymore_word, die_word, kill_word, want_word))
+  select(-kill_word)
+
+load("final_training.RData")
+
+fit_reduced10<-glm(suicidal~.,data=training.subset10,family=binomial)
+summary(fit_reduced10)
+
+fit_final<- fit_reduced10
+
+confint(fit_final)
+
+```
+
+#Graph the predictors
+
+```{r}
+load("final_training.RData")
+training.subset10.plot <- training.subset10 %>%
+  mutate(post.id=row_number())
+
+p1<-ggplot(training.subset10.plot, aes(age, suicidal, color=factor(suicidal)))+
+  geom_point()+ labs(x="Log age", 
+                     y = "Suicidal ideation status in text" )+
+  scale_color_brewer(palette="Set1")+
+  theme(legend.position = "none")
+
+p2<-ggplot(training.subset10.plot, aes(want_word, suicidal, color=factor(suicidal)))+
+  geom_point() + labs(x="'want'",
+                      y = "Suicidal ideation status in text" )+
+  scale_color_brewer(palette="Set1")+
+  theme(legend.position = "none")
+
+p3<-ggplot(training.subset10.plot, aes(person_word,suicidal, color=factor(suicidal)))+
+  geom_point()+ labs(x="'person'", 
+                     y = "Suicidal ideation status in text" )+
+  scale_color_brewer(palette="Set1")+
+  theme(legend.position = "none")
+
+p4<-ggplot(training.subset10.plot, aes(positive_word, suicidal, color=factor(suicidal)))+
+  geom_point() + labs(x="'positive'", 
+                      y = "Suicidal ideation status in text" )+
+  scale_color_brewer(palette="Set1")+
+  theme(legend.position = "none")
+
+p5<-ggplot(training.subset10.plot, aes(die_word, suicidal, color=factor(suicidal)))+
+  geom_point() + labs(x="'die'", 
+                      y = "Suicidal ideation status in text" )+
+  scale_color_brewer(palette="Set1")+
+  theme(legend.position = "none")
+
+p6<-ggplot(training.subset10.plot, aes(anymore_word, suicidal, color=factor(suicidal)))+
+  geom_point() + labs(x="'anymore'", 
+                      y = "Suicidal ideation status in text" )+
+  scale_color_brewer(palette="Set1")+
+  theme(legend.position = "none")
+
+p7<-ggplot(training.subset10.plot, aes(life_word, suicidal, color=factor(suicidal)))+
+  geom_point() + labs(x="'life'", 
+                      y = "Suicidal ideation status in text" )+
+  scale_color_brewer(palette="Set1")+
+  theme(legend.position = "none")
+
+p8<-ggplot(training.subset10.plot, aes(fucking_word, suicidal, color=factor(suicidal)))+
+  geom_point() + labs(x="'fucking'", 
+                      y = "Suicidal ideation status in text" )+
+  scale_color_brewer(palette="Set1")+
+  theme(legend.position = "none")
+
+p9<-ggplot(training.subset10.plot, aes(sec_pronouns, suicidal, color=factor(suicidal)))+
+  geom_point() +labs(x="2nd-person pronouns", 
+                     y = "Suicidal ideation status in text" )+
+  scale_color_brewer(palette="Set1")+
+  theme(legend.position = "none")
+
+p10<-ggplot(training.subset10.plot, aes(job_words, suicidal, color=factor(suicidal)))+
+  geom_point() +labs(x="'job' or 'employ-'", 
+                     y = "Suicidal ideation status in text" )+
+  scale_color_brewer(palette="Set1")+
+  theme(legend.position = "none")
+
+pdf(file="exploratory.pdf")
+pushViewport(viewport(layout = grid.layout(2, 5)))
+grid.text("Log-predictors and Suicide Ideation Status", vp = viewport(layout.pos.row = 1, layout.pos.col = 1:2))
+print(p1, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(p2, vp = viewport(layout.pos.row = 1, layout.pos.col = 2))
+print(p3, vp = viewport(layout.pos.row = 1, layout.pos.col = 3))
+print(p4, vp = viewport(layout.pos.row = 1, layout.pos.col = 4))
+print(p5, vp = viewport(layout.pos.row = 1, layout.pos.col = 5))
+print(p6, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
+print(p7, vp = viewport(layout.pos.row = 2, layout.pos.col = 2))
+print(p8, vp = viewport(layout.pos.row = 2, layout.pos.col = 3))
+print(p9, vp = viewport(layout.pos.row = 2, layout.pos.col = 4))
+print(p10, vp = viewport(layout.pos.row = 2, layout.pos.col = 5))
+dev.off()
+
+```
+
+# ROC curves
+```{r}
+#ROC curve
+train.predictions <- predict(fit_final,training.subset10,type="response")
+
+n<-length(train.predictions)
+results<-rep(1,n)
+for (i in 1:n){
+  #Classify >0.5 as suicidal
+  if (train.predictions[i]>=0.5){
+    results[i]=1
+  } else {
+    #Classify <0.5 as not suicidal
+    results[i]=0
+  }
+}
+
+table(results, training.subset10$suicidal)
+
+
+
+plot(roc(training.subset10$suicidal,results),main="ROC curve for training data")
+auc(training.subset10$suicidal, results) # 0.8135
+
+#Test set
+test.set.for.analysis <- test.set %>%
+  select(c(suicidal,age,want_word, person_word,   positive_word,
+           die_word,anymore_word,  life_word, fucking_word,  sec_pronouns,
+           job_words))
+
+load("final_test.RData")
+test.predictions <- predict(fit_final,test.set.for.analysis,type="response")
+
+n<-length(test.set.for.analysis$suicidal)
+results1<-rep(1,n)
+for (i in 1:n){
+  #Classify >0.5 as suicidal
+  if (test.predictions[i]>=0.5){
+    results1[i]=1
+  } else {
+    #Classify <0.5 as not suicidal
+    results1[i]=0
+  }
+}
+table(results1,test.set.for.analysis$suicidal)
+
+plot(roc(test.set.for.analysis$suicidal,results1),main="ROC curve for test data")
+auc(test.set.for.analysis$suicidal, results1) #0.8063
+
+```
+
+### Alternate model
+An alternative model without any of the non-linear predictors loses a lot of predictive power.
+
+```{r}
+
+training.subset.alt <- training.subset9 %>%
+  select(-c(fucking_word,anymore_word, die_word, kill_word, want_word))
+
+save(training.subset.alt,file="training.subset.alt.RData")
+
+fit_reduced.alt<-glm(suicidal~.,data=training.subset.alt,family=binomial)
+summary(fit_reduced.alt)
+
+anova(fit_final,fit_reduced.alt)
+
+fit_final<-fit_reduced.alt
+
+train.predictions <- predict(fit_final,training.subset10,type="response")
+
+n<-length(train.predictions)
+results3<-rep(1,n)
+for (i in 1:n){
+  #Classify >0.5 as suicidal
+  if (train.predictions[i]>=0.5){
+    results3[i]=1
+  } else {
+    #Classify <0.5 as not suicidal
+    results3[i]=0
+  }
+}
+
+table(results3, training.subset10$suicidal)
+
+
+plot(roc(training.subset10$suicidal,results3),main="ROC curve for training data")
+auc(training.subset10$suicidal, results3) #around 68%
+colnames(training.subset10)
+
+
+pdf(file="ROC1.pdf")
+plot(roc(training.subset10$suicidal,results),main="ROC for training data, full model")
+dev.off()
+pdf(file="ROC2.pdf")
+plot(roc(test.set.for.analysis$suicidal,results1),main="ROC for test data, full model")
+dev.off()
+pdf(file="ROC3.pdf")
+plot(roc(training.subset10$suicidal,results3),main="ROC for training data, reduced model")
+dev.off()
+
+
+```
